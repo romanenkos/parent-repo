@@ -3,104 +3,106 @@ name: Parent Theme Code Synchronization
 on:
   push:
     branches:
-      - main # Triggered when code is merged into the stable Parent branch
+      - main 
 
 jobs:
   sync_to_child_themes:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # This grants the necessary push permission
-      issues: write # (Optional) Needed if you plan to create GitHub Issues on conflict
+      contents: write 
+      pull-requests: write # Required for creating PRs on conflict
+      
     steps:
       - name: Checkout Repository (Full History)
         uses: actions/checkout@v4
         with:
-          # Fetch full history (fetch-depth: 0) needed for complex merges
           fetch-depth: 0 
-          # Use the default GitHub token for internal repository pushes
           token: ${{ secrets.GITHUB_TOKEN }} 
           
-      - name: Configure Git User
+      - name: Configure Git User and Branches
+        id: config
         run: |
           git config user.name "GitHub Actions Sync"
           git config user.email "actions@github.com"
-
-      - name: Define Branches and Parent Source
-        id: config
-        run: |
           echo "PARENT_BRANCH=main" >> $GITHUB_ENV
-          # Define the target child branches
           echo "CHILD_THEMES=child-amer-main child-emea-main child-anz-main" >> $GITHUB_ENV
 
-      - name: Automated Safe Merge and Push
+      # --- PHASE 1: CONFLICT CHECK ON ALL BRANCHES ---
+      - name: 1. All-or-Nothing Conflict Check
+        id: conflict_check
+        env:
+          CHILD_THEMES: ${{ env.CHILD_THEMES }}
+          PARENT_BRANCH: ${{ env.PARENT_BRANCH }}
+        
+        run: |
+          FAILED_BRANCHES="" 
+          MAIN_DIR=$(pwd)
+          
+          for CHILD_BRANCH in $CHILD_THEMES; do
+            WORKTREE_DIR="${MAIN_DIR}/worktree-${CHILD_BRANCH}"
+            echo "--- Checking conflicts for: $CHILD_BRANCH ---"
+            
+            # Create worktree
+            git worktree add --force $WORKTREE_DIR $CHILD_BRANCH
+            cd $WORKTREE_DIR
+            
+            # Attempt Merge (Non-Fast-Forward, No Commit)
+            if ! git merge --no-ff --no-commit $PARENT_BRANCH > /dev/null 2>&1; then
+              echo "❌ FATAL: Git merge failed unexpectedly. Flagging for failure."
+              git merge --abort
+              FAILED_BRANCHES="$FAILED_BRANCHES $CHILD_BRANCH"
+            
+            # Conflict Detection
+            elif git status --porcelain | grep -E '^(UU|AA|DD)'; then
+              echo "🚨 CONFLICT DETECTED. Flagging branch for PR creation."
+              FAILED_BRANCHES="$FAILED_BRANCHES $CHILD_BRANCH"
+              git merge --abort
+            else
+              echo "✅ No conflicts detected."
+            fi
+            
+            # Cleanup worktree
+            cd $MAIN_DIR
+            git worktree remove $WORKTREE_DIR --force
+            echo "--- Check complete for $CHILD_BRANCH ---"
+          done
+          
+          # Set outputs for the next steps
+          echo "failed_branches=${FAILED_BRANCHES}" >> $GITHUB_OUTPUT
+          
+          if [ -n "$FAILED_BRANCHES" ]; then
+            echo "::error::Conflict check failed on one or more branches. HALTING DEPLOYMENT."
+            exit 1 # Fail the step to trigger the conflict handler (Phase 3)
+          fi
+          
+          echo "🎉 All branches are conflict-free. Proceeding to final merge."
+
+
+      # --- PHASE 2: SUCCESSFUL MERGE AND PUSH (Only runs if check passed) ---
+      - name: 2. Final All-Clear Merge and Deployment
+        if: success()
         env:
           CHILD_THEMES: ${{ env.CHILD_THEMES }}
           PARENT_BRANCH: ${{ env.PARENT_BRANCH }}
           
         run: |
-          CONFLICT_FLAG="false"
+          # Revert to the main directory for standard checkout/push operations
+          # NOTE: Since no worktrees were left behind, the environment is clean.
           
           for CHILD_BRANCH in $CHILD_THEMES; do
-            echo "--- Attempting sync: $PARENT_BRANCH -> $CHILD_BRANCH ---"
+            echo "--- Final Merge and Push: $CHILD_BRANCH ---"
             
-            # 1. Checkout the target child branch
+            # Checkout the target child branch in the main working directory
             git checkout $CHILD_BRANCH
             
-            # 2. Attempt Merge (Non-Fast-Forward, No Commit)
-            # This allows Git to stop and leave conflict markers if resolution is needed.
-            # We suppress merge output to check status via git status later.
-            if ! git merge --no-ff --no-commit $PARENT_BRANCH > /dev/null 2>&1; then
-              
-              # Merge failed due to external reason (e.g., unrelated history, though unlikely here)
-              echo "❌ FATAL: Git merge failed unexpectedly on $CHILD_BRANCH. Aborting merge."
-              git merge --abort
-              CONFLICT_FLAG="true"
-              break
-            fi
+            # Perform the final merge and commit
+            git merge --no-ff $PARENT_BRANCH -m "Automated Sync: Merge stable code from $PARENT_BRANCH (SHA: $(git rev-parse --short $PARENT_BRANCH))"
             
-            # 3. Conflict Detection using Git status
-            # Check for files with 'UU' (Unmerged) status, which indicates conflicts.
-            if git status --porcelain | grep -E '^(UU|AA|DD)'; then
-              echo "🚨 CRITICAL CONFLICT DETECTED in $CHILD_BRANCH (Two-Way Sync Risk)! Deployment halted."
-              # Clean up the failed merge attempt immediately
-              git merge --abort
-              
-              # Store the failed branch name for notification and fail the pipeline
-              echo "FAILED_BRANCH=$CHILD_BRANCH" >> $GITHUB_ENV
-              CONFLICT_FLAG="true"
-              break # Stop the entire synchronization process immediately
-            else
-              echo "✅ No conflicts detected. Committing and pushing..."
-              
-              # 4. Commit the successful merge
-              git commit -m "Automated Sync: Merge stable code from $PARENT_BRANCH (SHA: $(git rev-parse --short $PARENT_BRANCH))"
-              
-              # 5. Push the merged code back (Triggers Shopify deployment)
-              git push origin $CHILD_BRANCH
-              
-              echo "🚀 Successfully pushed to $CHILD_BRANCH. Shopify deployment initiated."
-            fi
-            echo "--- Sync complete for $CHILD_BRANCH ---"
-            echo ""
+            # Push the merged code back (Triggers Shopify deployment)
+            git push origin $CHILD_BRANCH
             
+            echo "🚀 Successfully deployed to $CHILD_BRANCH."
           done
           
-          # 6. Exit control based on conflict flag
-          if [ "$CONFLICT_FLAG" = "true" ]; then
-            exit 1
-          fi
-
-      - name: Notify and Halt Pipeline on Conflict (AC 4)
-        # This step only runs if the previous step failed (exit 1)
-        if: failure()
-        run: |
-          FAILED_BRANCH=${{ env.FAILED_BRANCH }}
-          echo "::error file=parent-theme-sync.yml::Merge conflict detected on branch: $FAILED_BRANCH. Deployment pipeline halted."
-          echo "ACTION REQUIRED: A developer MUST manually resolve the conflict in the '$FAILED_BRANCH' branch and push the resolution."
-          # Integrate Slack or other notification service here (e.g., using a dedicated action or webhook).
-          
-          # Use a tool like GitHub CLI to open an issue for tracking
-          # Example (requires write access to issues):
-          # gh issue create --title "🚨 CONFLICT HALT: Sync failed on $FAILED_BRANCH" --body "Automated sync from main failed due to conflict on $FAILED_BRANCH. Manual resolution needed."
-          
-          # The job is already marked as failed by the previous step's 'exit 1'
+          # Return to a neutral branch after push
+          git checkout $PARENT_BRANCH
