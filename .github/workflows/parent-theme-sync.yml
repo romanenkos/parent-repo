@@ -8,6 +8,9 @@ on:
 jobs:
   sync_to_child_themes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # This grants the necessary push permission
+      issues: write # (Optional) Needed if you plan to create GitHub Issues on conflict
     steps:
       - name: Checkout Repository (Full History)
         uses: actions/checkout@v4
