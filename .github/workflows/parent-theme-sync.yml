@@ -39,6 +39,10 @@ jobs:
           
         run: |
           CONFLICT_FLAG="false"
+          pwd
+          mkdir abc
+          mkdir cod
+          ls -la
           
           for CHILD_BRANCH in $CHILD_THEMES; do
             echo "--- Attempting sync: $PARENT_BRANCH -> $CHILD_BRANCH ---"
