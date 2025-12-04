@@ -89,7 +89,7 @@ jobs:
 
       - name: Notify and Halt Pipeline on Conflict (AC 4)
         # This step only runs if the previous step failed (exit 1)
-        if failure()
+        if: failure()
         run: |
           FAILED_BRANCH=${{ env.FAILED_BRANCH }}
           echo "::error file=parent-theme-sync.yml::Merge conflict detected on branch: $FAILED_BRANCH. Deployment pipeline halted."
