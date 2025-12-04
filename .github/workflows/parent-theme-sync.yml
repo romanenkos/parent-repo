@@ -71,7 +71,7 @@ jobs:
           echo "failed_branches=${FAILED_BRANCHES}" >> $GITHUB_OUTPUT
           
           if [ -n "$FAILED_BRANCHES" ]; then
-            echo "::error::Conflict check failed on one or more branches. HALTING DEPLOYMENT."
+            echo "::error::Conflict check failed for branches: $FAILED_BRANCHES. HALTING DEPLOYMENT."
             exit 1 # Fail the step to trigger the conflict handler (Phase 3)
           fi
           
